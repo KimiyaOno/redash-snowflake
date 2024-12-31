@@ -1,5 +1,13 @@
 try:
     import snowflake.connector
+    import os
+    from cryptography.hazmat.backends import default_backend
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.hazmat.primitives.asymmetric import dsa
+    from cryptography.hazmat.primitives import serialization
+    from tempfile import NamedTemporaryFile
+    from base64 import b64decode
+
 
     enabled = True
 except ImportError:
@@ -46,6 +54,7 @@ class Snowflake(BaseSQLQueryRunner):
                 "warehouse": {"type": "string"},
                 "database": {"type": "string"},
                 "region": {"type": "string", "default": "us-west"},
+                "privatekeyFile": {"type": "string", "title": "private key File"},
                 "lower_case_columns": {
                     "type": "boolean",
                     "title": "Lower Case Column Names in Results",
@@ -60,10 +69,11 @@ class Snowflake(BaseSQLQueryRunner):
                 "warehouse",
                 "database",
                 "region",
+                "privatekeyFile",
                 "host",
             ],
-            "required": ["user", "password", "account", "database", "warehouse"],
-            "secret": ["password"],
+            "required": ["user", "password", "account", "database", "warehouse",""],
+            "secret": ["password","privatekeyfile"],
             "extra_options": [
                 "host",
             ],
@@ -80,10 +90,30 @@ class Snowflake(BaseSQLQueryRunner):
             return TYPE_FLOAT
         return t
 
+    def _generate_pkb_file(self):
+        cert_encoded_bytes = self.configuration.get("privatekeyFile", None)
+        if cert_encoded_bytes:
+            with NamedTemporaryFile(mode="w", delete=False) as key:
+                p_key= serialization.load_pem_private_key(
+                    key.read(),
+                    password=os.environ['PRIVATE_KEY_PASSPHRASE'].encode(),
+                    backend=default_backend()
+                )
+                pkb = p_key.private_bytes(
+                    encoding=serialization.Encoding.DER,
+                    format=serialization.PrivateFormat.PKCS8,
+                    encryption_algorithm=serialization.NoEncryption())
+                return pkb
+        return None
+
+    def _cleanup_pkb_file(self, cert_path):
+        if cert_path:
+            os.remove(cert_path)
+
     def _get_connection(self):
         region = self.configuration.get("region")
         account = self.configuration["account"]
-
+        pkb = self._generate_pkb_file()
         # for us-west we don't need to pass a region (and if we do, it fails to connect)
         if region == "us-west":
             region = None
@@ -95,6 +125,17 @@ class Snowflake(BaseSQLQueryRunner):
                 host = "{}.{}.snowflakecomputing.com".format(account, region)
             else:
                 host = "{}.snowflakecomputing.com".format(account)
+        # with open("<path>/rsa_key.p8", "rb") as key:
+        #     p_key= serialization.load_pem_private_key(
+        #     key.read(),
+        #     password=os.environ['PRIVATE_KEY_PASSPHRASE'].encode(),
+        #     backend=default_backend()
+        # )
+
+        # pkb = p_key.private_bytes(
+        # encoding=serialization.Encoding.DER,
+        # format=serialization.PrivateFormat.PKCS8,
+        # encryption_algorithm=serialization.NoEncryption())
 
         connection = snowflake.connector.connect(
             user=self.configuration["user"],
@@ -102,6 +143,7 @@ class Snowflake(BaseSQLQueryRunner):
             account=account,
             region=region,
             host=host,
+            private_key=pkb,
             application="Redash/{} (Snowflake)".format(__version__.split("-")[0]),
         )
 
